@@ -1,0 +1,81 @@
+[project]
+name = "saga-soft-utils"
+authors = []
+description = "Utilities for saga-soft projects"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "pyyaml"
+]
+
+[tool.ruff]
+line-length = 120
+preview = false
+
+[tool.ruff.lint]
+# Rules: https://docs.astral.sh/ruff/rules
+select = [
+    "A",     # flake8-builtins (A)
+    "ANN",   # flake8-annotations (ANN)
+    "B",     # flake8-bugbear (B)
+    "C4",    # flake8-comprehensions (C4)
+    "D",     # pydocstyle (D)
+    "E",     # pycodestyle (E)
+    "F",     # Pyflakes (F)
+    "FA",    # flake8-future-annotations (FA)
+    "G",     # flake8-logging-format (G)
+    "I",     # isort (I)
+    "ISC",   # flake8-implicit-str-concat (ISC)
+    "LOG",   # flake8-logging (LOG)
+    "PERF",  # Perflint (PERF)
+    "PIE",   # flake8-pie (PIE)
+    "PLC",   # Pylint Convention (PLC)
+    "PLE",   # Pylint Error (PLE)
+    "PLR17", # Refactor (PLR) - Only PLR17xx
+    "PLW",   # Pylint Warning (PLW)
+    "PT",    # flake8-pytest-style (PT)
+    "Q",     # flake8-quotes (Q)
+    "RET",   # flake8-return (RET)
+    "RUF",   # Ruff-specific rules (RUF)
+    "SIM",   # flake8-simplify (SIM)
+    "SLF",   # flake8-self (SLF)
+    "SLOT",  # flake8-slots (SLOT)
+    "TC",    # flake8-type-checking (TC)
+    "TID",   # flake8-tidy-imports (TID)
+    "UP",    # pyupgrade (UP)
+    "W",     # pycodestyle (W)
+]
+ignore = [
+    "ANN401",  # any-type
+    "D107",    # undocumented-public-init
+    "D203",    # incorrect-blank-line-before-class
+    "D205",    # missing-blank-line-after-summary
+    "D213",    # multi-line-summary-second-line
+    "PLC0415", # import-outside-top-level
+    "PLC1901", # compare-to-empty-string
+    "PLW0108", # unnecessary-lambda
+    "PLW0717", # too-many-statements-in-try-clause
+    "PLW2901", # redefined-loop-name
+    "RET505",  # superfluous-else-return
+    "RUF015",  # unnecessary-iterable-allocation-for-first-element
+    "RUF067",  # non-empty-init-module
+    "SIM108",  # if-else-block-instead-of-if-exp
+    "UP015",   # redundant-open-modes
+    "UP030",   # format-literals
+]
+
+[tool.ruff.lint.isort]
+lines-between-types = 1
+forced-separate = ["tests"]
+required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.lint.pylint]
+max-nested-blocks = 10
+
+[tool.ruff.format]
+quote-style = "double"
+preview = true
+
+[tool.pyright]
+reportIncompatibleMethodOverride = false
+pythonVersion = "3.14"

@@ -1,0 +1,12 @@
+# Setup/Install
+*.spec
+*.egg-info
+.venv
+
+# Python Temp
+__pycache__
+*.pyc
+
+# IDE
+.vscode
+.ruff_cache
