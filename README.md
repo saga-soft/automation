@@ -6,7 +6,7 @@ Used for scripts and automated jobs.
 
 ## Lock Threads
 
-A workflow and script to lock closed issues and pull requests that has been inactive for a given amount of time.
+A workflow and script to lock closed issues and pull requests that have been inactive for a given amount of time.
 The tool consists of the following files:
 
 * `.github/workflows/lock-thread.yml`: The workflow job running as a cron job.
