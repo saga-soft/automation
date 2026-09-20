@@ -46,7 +46,7 @@ class Candidate:
 
     repo: str
     number: int
-    updated_at: str
+    updated_at: datetime
     config: ThreadConfig
 
 
@@ -108,12 +108,21 @@ def cutoff_timestamp(days: int) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def search_issue_like(client: GitHubClient, repo: str, kind: str, cutoff: str) -> list[tuple[int, str]]:
+def parse_timestamp(timestamp: str) -> datetime:
+    """Parse a GitHub API ISO 8601 UTC timestamp into an aware datetime."""
+    return datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+
+
+def search_issue_like(client: GitHubClient, repo: str, kind: str, cutoff: str) -> list[tuple[int, datetime]]:
     """Search for closed, unlocked issues or PRs in repo updated before cutoff."""
     gh_kind = "pr" if kind == "pr" else "issue"
     query = f"repo:{repo} updated:<{cutoff} is:closed is:unlocked is:{gh_kind}"
     result = client.get("/search/issues", {"q": query, "sort": "updated", "order": "asc", "per_page": 50})
-    return [(item["number"], item["updated_at"]) for item in result.get("items", []) if not item.get("locked")]
+    return [
+        (item["number"], parse_timestamp(item["updated_at"]))
+        for item in result.get("items", [])
+        if not item.get("locked")
+    ]
 
 
 def gather_candidates(client: GitHubClient, repos_cfg: list[dict]) -> list[Candidate]:
@@ -158,15 +167,13 @@ def process_candidate(client: GitHubClient, candidate: Candidate, dry_run: bool)
     print(f"Locked {label}")
 
 
-def format_timestamp(timestamp: str) -> str:
-    """Format an ISO 8601 UTC timestamp as 'YYYY-MM-DD HH:MM:SS (UTC)'."""
-    dt = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")
+def format_timestamp(dt: datetime) -> str:
+    """Format a datetime as 'YYYY-MM-DD HH:MM:SS'."""
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def days_since(timestamp: str) -> int:
-    """Return the number of whole days between the ISO 8601 UTC timestamp and now."""
-    dt = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+def days_since(dt: datetime) -> int:
+    """Return the number of whole days between dt and now."""
     return (datetime.now(UTC) - dt).days
 
 
@@ -178,8 +185,9 @@ def build_report(
     results: list[tuple[Candidate, str, str | None]],
 ) -> str:
     """Build a markdown report summarizing what was (or would be) locked."""
-    lines = ["# Lock Threads Report", ""]
+    lines = ["## Lock Threads Report", ""]
     lines.append(f"**Mode:** {'Dry Run' if dry_run else 'Live'}  ")
+    lines.append(f"**Time:** {format_timestamp(datetime.now(UTC))} (UTC)  ")
     lines.append(f"**Found:** {total_found} inactive thread(s) across {repo_count} repo(s)  ")
     if skipped > 0:
         lines.append(f"**Deferred:** {skipped} thread(s) to the next run  ")
@@ -247,10 +255,9 @@ def main() -> None:
             print(f"ERROR locking {entry.repo} {entry.config.kind} #{entry.number}: {exc}", file=sys.stderr)
 
     report = build_report(args.dry_run, len(candidates), len(repos_cfg), skipped, results)
-    print(f"\n{report}")
 
     REPORT_PATH.write_text(report, encoding="utf-8")
-    print(f"Wrote report to {REPORT_PATH}")
+    print(f"\nWrote report to {REPORT_PATH}")
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
