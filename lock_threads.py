@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -23,9 +24,11 @@ from pathlib import Path
 import yaml
 
 CONFIG_PATH = Path(__file__).parent / "lock_threads.yaml"
+REPORT_PATH = Path(__file__).parent / "lock_threads_report.md"
 MAX_ACTIONS_PER_RUN = 50
 LOCK_REASON = "resolved"
 KIND_TABLE = (("issue", "issues"), ("pr", "prs"))
+KIND_URL_PATH = {"issue": "issues", "pr": "pull"}
 
 
 @dataclass
@@ -126,9 +129,24 @@ def gather_candidates(client: GitHubClient, repos_cfg: list[dict]) -> list[Candi
     return candidates
 
 
+def candidate_label(candidate: Candidate) -> str:
+    """Return the plain-text label identifying a candidate thread."""
+    return f"{candidate.repo} {candidate.config.kind} #{candidate.number}"
+
+
+def candidate_url(candidate: Candidate) -> str:
+    """Return the GitHub URL for a candidate thread."""
+    return f"https://github.com/{candidate.repo}/{KIND_URL_PATH[candidate.config.kind]}/{candidate.number}"
+
+
+def candidate_link(candidate: Candidate) -> str:
+    """Return the candidate's label as a markdown link to its GitHub thread."""
+    return f"[{candidate_label(candidate)}]({candidate_url(candidate)})"
+
+
 def process_candidate(client: GitHubClient, candidate: Candidate, dry_run: bool) -> None:
     """Comment (if configured) and lock a single candidate thread."""
-    label = f"{candidate.repo} {candidate.config.kind} #{candidate.number}"
+    label = candidate_label(candidate)
     if dry_run:
         print(f"[dry-run] Would lock {label}")
         return
@@ -138,6 +156,50 @@ def process_candidate(client: GitHubClient, candidate: Candidate, dry_run: bool)
     client.put(f"/repos/{candidate.repo}/issues/{candidate.number}/lock", {"lock_reason": LOCK_REASON})
 
     print(f"Locked {label}")
+
+
+def format_timestamp(timestamp: str) -> str:
+    """Format an ISO 8601 UTC timestamp as 'YYYY-MM-DD HH:MM:SS (UTC)'."""
+    dt = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def days_since(timestamp: str) -> int:
+    """Return the number of whole days between the ISO 8601 UTC timestamp and now."""
+    dt = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    return (datetime.now(UTC) - dt).days
+
+
+def build_report(
+    dry_run: bool,
+    total_found: int,
+    repo_count: int,
+    skipped: int,
+    results: list[tuple[Candidate, str, str | None]],
+) -> str:
+    """Build a markdown report summarizing what was (or would be) locked."""
+    lines = ["# Lock Threads Report", ""]
+    lines.append(f"**Mode:** {'Dry Run' if dry_run else 'Live'}  ")
+    lines.append(f"**Found:** {total_found} inactive thread(s) across {repo_count} repo(s)  ")
+    if skipped > 0:
+        lines.append(f"**Deferred:** {skipped} thread(s) to the next run  ")
+    lines.append("")
+
+    if not results:
+        lines.append("No threads processed.")
+        return "\n".join(lines) + "\n"
+
+    lines.append("| Thread | Last Updated (UTC) | Days | Comment | Status |")
+    lines.append("|---|---|---|---|---|")
+    for candidate, status, detail in results:
+        comment = "Yes" if candidate.config.comment else "No"
+        status_text = f"{status}: {detail}" if detail else status
+        lines.append(
+            f"| {candidate_link(candidate)} | {format_timestamp(candidate.updated_at)} "
+            f"| {days_since(candidate.updated_at)} | {comment} | {status_text} |"
+        )
+    lines.append("")
+    return "\n".join(lines) + "\n"
 
 
 def ensure_gh_available() -> None:
@@ -174,12 +236,26 @@ def main() -> None:
         )
 
     errors = []
+    results: list[tuple[Candidate, str, str | None]] = []
     for entry in to_process:
         try:
             process_candidate(client, entry, args.dry_run)
+            results.append((entry, "Would lock" if args.dry_run else "Locked", None))
         except Exception as exc:
             errors.append(f"{entry.repo} {entry.config.kind} #{entry.number}: {exc}")
+            results.append((entry, "Error", str(exc)))
             print(f"ERROR locking {entry.repo} {entry.config.kind} #{entry.number}: {exc}", file=sys.stderr)
+
+    report = build_report(args.dry_run, len(candidates), len(repos_cfg), skipped, results)
+    print(f"\n{report}")
+
+    REPORT_PATH.write_text(report, encoding="utf-8")
+    print(f"Wrote report to {REPORT_PATH}")
+
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as fh:
+            fh.write(report)
 
     if errors:
         print(f"\n{len(errors)} error(s) occurred", file=sys.stderr)
