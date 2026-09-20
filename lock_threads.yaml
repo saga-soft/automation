@@ -19,3 +19,13 @@ repo:
         for related bugs or feature requests.
     prs:
       inactive_days: 30
+
+  - name: saga-soft/Collett
+    issues:
+      inactive_days: 90
+      comment: >
+        This issue has been automatically locked since there has not been
+        any recent activity after it was closed. Please open a new issue
+        for related bugs or feature requests.
+    prs:
+      inactive_days: 30
