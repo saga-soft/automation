@@ -26,6 +26,8 @@ import yaml
 CONFIG_PATH = Path(__file__).parent / "lock_threads.yaml"
 REPORT_PATH = Path(__file__).parent / "lock_threads_report.md"
 MAX_ACTIONS_PER_RUN = 50
+SEARCH_PAGE_SIZE = 100
+MAX_SEARCH_PAGES = 5
 LOCK_REASON = "resolved"
 KIND_TABLE = (("issue", "issues"), ("pr", "prs"))
 KIND_URL_PATH = {"issue": "issues", "pr": "pull"}
@@ -114,15 +116,28 @@ def parse_timestamp(timestamp: str) -> datetime:
 
 
 def search_issue_like(client: GitHubClient, repo: str, kind: str, cutoff: str) -> list[tuple[int, datetime]]:
-    """Search for closed, unlocked issues or PRs in repo updated before cutoff."""
+    """Search for closed, unlocked issues or PRs in repo updated before cutoff.
+
+    GitHub's `is:unlocked` search qualifier can lag reality (it has reported
+    already-locked threads as unlocked), so results are re-checked against
+    the `locked` field below. Paginating past the first page keeps those
+    stale entries from crowding genuine candidates out of the results.
+    """
     gh_kind = "pr" if kind == "pr" else "issue"
     query = f"repo:{repo} updated:<{cutoff} is:closed is:unlocked is:{gh_kind}"
-    result = client.get("/search/issues", {"q": query, "sort": "updated", "order": "asc", "per_page": 50})
-    return [
-        (item["number"], parse_timestamp(item["updated_at"]))
-        for item in result.get("items", [])
-        if not item.get("locked")
-    ]
+    found: list[tuple[int, datetime]] = []
+    for page in range(1, MAX_SEARCH_PAGES + 1):
+        result = client.get(
+            "/search/issues",
+            {"q": query, "sort": "updated", "order": "asc", "per_page": SEARCH_PAGE_SIZE, "page": page},
+        )
+        items = result.get("items", [])
+        found.extend(
+            (item["number"], parse_timestamp(item["updated_at"])) for item in items if not item.get("locked")
+        )
+        if len(items) < SEARCH_PAGE_SIZE:
+            break
+    return found
 
 
 def gather_candidates(client: GitHubClient, repos_cfg: list[dict]) -> list[Candidate]:
