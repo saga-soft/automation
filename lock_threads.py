@@ -26,14 +26,11 @@ import yaml
 
 CONFIG_PATH = Path(__file__).parent / "lock_threads.yaml"
 REPORT_PATH = Path(__file__).parent / "lock_threads_report.md"
-# GitHub's secondary/abuse rate limit is scoped to the calling token across all
-# repos it touches, not per repo, so this budget is shared by every GET/POST/PUT
-# call the whole run makes (searches, comments, and locks alike).
-MAX_API_CALLS_PER_RUN = 70
+
+MAX_API_CALLS_PER_RUN = 70  # Rate limit is 5000 per hour, 83 per minute
 SEARCH_PAGE_SIZE = 100
-# 6 repo/kind searches x 3 pages = 18 calls/run, well under the Search API's
-# 30 requests/minute limit even if every search needs to page fully.
 MAX_SEARCH_PAGES = 3
+
 LOCK_REASON = "resolved"
 KIND_TABLE = (("issue", "issues"), ("pr", "prs"))
 KIND_URL_PATH = {"issue": "issues", "pr": "pull"}
@@ -55,8 +52,8 @@ class CallBudgetExceeded(StopEarly):
 def stop_reason(exc: StopEarly) -> str:
     """Return the report-facing phrase describing why a run stopped early."""
     if isinstance(exc, RateLimitExceeded):
-        return "hit a GitHub API rate limit"
-    return f"reached this run's {MAX_API_CALLS_PER_RUN}-call API budget"
+        return "Hit a GitHub API rate limit"
+    return f"Reached this run's {MAX_API_CALLS_PER_RUN}-call API budget"
 
 
 @dataclass
@@ -167,9 +164,7 @@ def search_issue_like(client: GitHubClient, repo: str, kind: str, cutoff: str) -
             {"q": query, "sort": "updated", "order": "asc", "per_page": SEARCH_PAGE_SIZE, "page": page},
         )
         items = result.get("items", [])
-        found.extend(
-            (item["number"], parse_timestamp(item["updated_at"])) for item in items if not item.get("locked")
-        )
+        found.extend((item["number"], parse_timestamp(item["updated_at"])) for item in items if not item.get("locked"))
         if len(items) < SEARCH_PAGE_SIZE:
             break
     return found
@@ -317,7 +312,7 @@ def main() -> None:
     config = load_config(CONFIG_PATH)
     repos_cfg = config.get("repo", [])
     if not repos_cfg:
-        parser.error("config has no 'repo' entries")
+        parser.error("Config has no 'repo' entries")
 
     client = GitHubClient()
     candidates, stop_note = gather_candidates(client, repos_cfg)

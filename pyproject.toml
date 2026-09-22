@@ -1,8 +1,10 @@
 [project]
-name = "saga-soft-utils"
+name = "saga-soft-automation"
 authors = []
-description = "Utilities for saga-soft projects"
+description = "Automated tools for saga-soft projects"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE.md"]
 requires-python = ">=3.14"
 dependencies = [
     "pyyaml"
