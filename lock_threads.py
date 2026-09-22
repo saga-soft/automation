@@ -19,6 +19,7 @@ import sys
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from itertools import zip_longest
 from pathlib import Path
 
 import yaml
@@ -174,17 +175,33 @@ def search_issue_like(client: GitHubClient, repo: str, kind: str, cutoff: str) -
     return found
 
 
+def interleave_by_repo(by_repo: dict[str, list[Candidate]]) -> list[Candidate]:
+    """Round-robin each repo's oldest-first list into one fair processing order.
+
+    Takes one candidate from each repo in turn (each repo's own list already
+    sorted oldest first) so a single repo's backlog can't hog every queue
+    slot and starve the others, until every list is exhausted.
+    """
+    rounds = zip_longest(*by_repo.values())
+    return [candidate for round_ in rounds for candidate in round_ if candidate is not None]
+
+
 def gather_candidates(client: GitHubClient, repos_cfg: list[dict]) -> tuple[list[Candidate], str | None]:
-    """Search every configured repo/kind and return candidates, oldest first.
+    """Search every configured repo/kind and return candidates to process.
+
+    Candidates are grouped per repo (oldest first within each repo), then
+    interleaved round-robin across repos so each repo gets a fair share of
+    the queue instead of one repo's backlog crowding out the others.
 
     Returns (candidates, note): if a rate limit or this run's call budget is
     hit partway through, searching stops and whatever was already found is
     returned, with `note` set to a report-facing description of why.
     """
-    candidates: list[Candidate] = []
+    by_repo: dict[str, list[Candidate]] = {}
     note: str | None = None
     for repo_table in repos_cfg:
         repo = repo_table["name"]
+        repo_candidates: list[Candidate] = []
         for tc in build_thread_configs(repo_table):
             cutoff = cutoff_timestamp(tc.inactive_days)
             try:
@@ -194,15 +211,15 @@ def gather_candidates(client: GitHubClient, repos_cfg: list[dict]) -> tuple[list
                 print(f"Stopping search early ({note}) at {repo} [{tc.kind}]: {exc}", file=sys.stderr)
                 break
 
-            for number, updated_at in found:
-                candidates.append(Candidate(repo, number, updated_at, tc))
+            repo_candidates.extend(Candidate(repo, number, updated_at, tc) for number, updated_at in found)
+
+        repo_candidates.sort(key=lambda c: c.updated_at)  # oldest / most overdue first, within this repo
+        by_repo[repo] = repo_candidates
 
         if note:
             break
 
-    candidates.sort(key=lambda c: c.updated_at)  # oldest / most overdue first
-
-    return candidates, note
+    return interleave_by_repo(by_repo), note
 
 
 def candidate_label(candidate: Candidate) -> str:
