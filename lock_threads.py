@@ -25,12 +25,37 @@ import yaml
 
 CONFIG_PATH = Path(__file__).parent / "lock_threads.yaml"
 REPORT_PATH = Path(__file__).parent / "lock_threads_report.md"
-MAX_ACTIONS_PER_RUN = 50
+# GitHub's secondary/abuse rate limit is scoped to the calling token across all
+# repos it touches, not per repo, so this budget is shared by every GET/POST/PUT
+# call the whole run makes (searches, comments, and locks alike).
+MAX_API_CALLS_PER_RUN = 70
 SEARCH_PAGE_SIZE = 100
-MAX_SEARCH_PAGES = 5
+# 6 repo/kind searches x 3 pages = 18 calls/run, well under the Search API's
+# 30 requests/minute limit even if every search needs to page fully.
+MAX_SEARCH_PAGES = 3
 LOCK_REASON = "resolved"
 KIND_TABLE = (("issue", "issues"), ("pr", "prs"))
 KIND_URL_PATH = {"issue": "issues", "pr": "pull"}
+RATE_LIMIT_MARKERS = ("rate limit exceeded", "secondary rate limit")
+
+
+class StopEarly(RuntimeError):
+    """Base for conditions that stop a run early without counting as a failure."""
+
+
+class RateLimitExceeded(StopEarly):
+    """Raised when the GitHub API reports a primary or secondary rate limit."""
+
+
+class CallBudgetExceeded(StopEarly):
+    """Raised when this run's own MAX_API_CALLS_PER_RUN budget is used up."""
+
+
+def stop_reason(exc: StopEarly) -> str:
+    """Return the report-facing phrase describing why a run stopped early."""
+    if isinstance(exc, RateLimitExceeded):
+        return "hit a GitHub API rate limit"
+    return f"reached this run's {MAX_API_CALLS_PER_RUN}-call API budget"
 
 
 @dataclass
@@ -55,13 +80,22 @@ class Candidate:
 class GitHubClient:
     """Thin wrapper around `gh api`, reusing gh's own authentication."""
 
+    def __init__(self) -> None:
+        self.call_count = 0
+
     def _request(self, method: str, path: str, fields: dict | None = None) -> dict:
+        if self.call_count >= MAX_API_CALLS_PER_RUN:
+            raise CallBudgetExceeded(f"Reached the {MAX_API_CALLS_PER_RUN}-call budget for this run")
+        self.call_count += 1
         args = ["gh", "api", path, "-X", method, "-H", "Accept: application/vnd.github+json"]
         for key, value in (fields or {}).items():
             args += ["-f", f"{key}={value}"]
         result = subprocess.run(args, capture_output=True, text=True, check=False)
         if result.returncode != 0:
-            raise RuntimeError(f"gh api {method} {path} failed: {result.stderr.strip()}")
+            message = result.stderr.strip()
+            if any(marker in message.lower() for marker in RATE_LIMIT_MARKERS):
+                raise RateLimitExceeded(message)
+            raise RuntimeError(f"gh api {method} {path} failed: {message}")
         return json.loads(result.stdout) if result.stdout.strip() else {}
 
     def get(self, path: str, params: dict) -> dict:
@@ -140,17 +174,35 @@ def search_issue_like(client: GitHubClient, repo: str, kind: str, cutoff: str) -
     return found
 
 
-def gather_candidates(client: GitHubClient, repos_cfg: list[dict]) -> list[Candidate]:
-    """Search every configured repo/kind and return candidates, oldest first."""
+def gather_candidates(client: GitHubClient, repos_cfg: list[dict]) -> tuple[list[Candidate], str | None]:
+    """Search every configured repo/kind and return candidates, oldest first.
+
+    Returns (candidates, note): if a rate limit or this run's call budget is
+    hit partway through, searching stops and whatever was already found is
+    returned, with `note` set to a report-facing description of why.
+    """
     candidates: list[Candidate] = []
+    note: str | None = None
     for repo_table in repos_cfg:
         repo = repo_table["name"]
         for tc in build_thread_configs(repo_table):
             cutoff = cutoff_timestamp(tc.inactive_days)
-            for number, updated_at in search_issue_like(client, repo, tc.kind, cutoff):
+            try:
+                found = search_issue_like(client, repo, tc.kind, cutoff)
+            except StopEarly as exc:
+                note = stop_reason(exc)
+                print(f"Stopping search early ({note}) at {repo} [{tc.kind}]: {exc}", file=sys.stderr)
+                break
+
+            for number, updated_at in found:
                 candidates.append(Candidate(repo, number, updated_at, tc))
+
+        if note:
+            break
+
     candidates.sort(key=lambda c: c.updated_at)  # oldest / most overdue first
-    return candidates
+
+    return candidates, note
 
 
 def candidate_label(candidate: Candidate) -> str:
@@ -198,6 +250,7 @@ def build_report(
     repo_count: int,
     skipped: int,
     results: list[tuple[Candidate, str, str | None]],
+    stop_note: str | None = None,
 ) -> str:
     """Build a markdown report summarizing what was (or would be) locked."""
     lines = ["## Lock Threads Report", ""]
@@ -206,6 +259,8 @@ def build_report(
     lines.append(f"**Found:** {total_found} inactive thread(s) across {repo_count} repo(s)  ")
     if skipped > 0:
         lines.append(f"**Deferred:** {skipped} thread(s) to the next run  ")
+    if stop_note:
+        lines.append(f"**Note:** Stopped early: {stop_note}. Remaining threads are deferred to the next run.  ")
     lines.append("")
 
     if not results:
@@ -248,15 +303,12 @@ def main() -> None:
         parser.error("config has no 'repo' entries")
 
     client = GitHubClient()
-    candidates = gather_candidates(client, repos_cfg)
+    candidates, stop_note = gather_candidates(client, repos_cfg)
     print(f"Found {len(candidates)} inactive thread(s) across {len(repos_cfg)} repo(s)")
 
-    to_process = candidates[:MAX_ACTIONS_PER_RUN]
-    skipped = len(candidates) - len(to_process)
-    if skipped > 0:
-        print(
-            f"Capping this run to the {MAX_ACTIONS_PER_RUN} most overdue threads ({skipped} deferred to the next run)"
-        )
+    # If searching already used up the run's call budget (or hit a rate
+    # limit), don't attempt any locks/comments — they'd just fail too.
+    to_process = [] if stop_note else candidates
 
     errors = []
     results: list[tuple[Candidate, str, str | None]] = []
@@ -264,12 +316,17 @@ def main() -> None:
         try:
             process_candidate(client, entry, args.dry_run)
             results.append((entry, "Would lock" if args.dry_run else "Locked", None))
+        except StopEarly as exc:
+            stop_note = stop_reason(exc)
+            print(f"Stopping run early ({stop_note}) after {len(results)} thread(s): {exc}", file=sys.stderr)
+            break
         except Exception as exc:
             errors.append(f"{entry.repo} {entry.config.kind} #{entry.number}: {exc}")
             results.append((entry, "Error", str(exc)))
             print(f"ERROR locking {entry.repo} {entry.config.kind} #{entry.number}: {exc}", file=sys.stderr)
 
-    report = build_report(args.dry_run, len(candidates), len(repos_cfg), skipped, results)
+    skipped = len(candidates) - len(results)
+    report = build_report(args.dry_run, len(candidates), len(repos_cfg), skipped, results, stop_note)
 
     REPORT_PATH.write_text(report, encoding="utf-8")
     print(f"\nWrote report to {REPORT_PATH}")
