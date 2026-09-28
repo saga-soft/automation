@@ -29,7 +29,7 @@ wheels = [
 ]
 
 [[package]]
-name = "saga-soft-utils"
+name = "saga-soft-automation"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

@@ -14,5 +14,7 @@ The tool consists of the following files:
 * `lock_threads.yaml`: The configuration for the lock threads job.
 
 Repos to run this job against can be added to the `lock_threads.yaml` file, and the inactive days count set and an
-optional comment to post on the issue or pull request. The job is performed by the
+optional comment to post on the issue or pull request. An optional `look_forward_days` can also be set to surface
+threads that aren't old enough to lock yet but will become inactive within that many days. These are listed in the
+report with the status "Queued" instead of being locked. The job is performed by the
 [Saga Soft Bot](https://github.com/saga-soft-bot) account.

@@ -63,6 +63,7 @@ class ThreadConfig:
     kind: str  # "issue" or "pr"
     inactive_days: int
     comment: str | None = None
+    look_forward_days: int = 0
 
 
 @dataclass
@@ -73,6 +74,7 @@ class Candidate:
     number: int
     updated_at: datetime
     config: ThreadConfig
+    queued: bool = False
 
 
 class GitHubClient:
@@ -131,6 +133,7 @@ def build_thread_configs(repo_table: dict) -> list[ThreadConfig]:
                 kind=kind,
                 inactive_days=inactive_days,
                 comment=table.get("comment"),
+                look_forward_days=table.get("look_forward_days", 0),
             )
         )
     return configs
@@ -188,6 +191,11 @@ def gather_candidates(client: GitHubClient, repos_cfg: list[dict]) -> tuple[list
     interleaved round-robin across repos so each repo gets a fair share of
     the queue instead of one repo's backlog crowding out the others.
 
+    A thread config's `look_forward_days` widens the search to also pick up
+    threads that aren't old enough to lock yet but will cross `inactive_days`
+    within that many days; those are returned as `queued` candidates rather
+    than ones ready to lock.
+
     Returns (candidates, note): if a rate limit or this run's call budget is
     hit partway through, searching stops and whatever was already found is
     returned, with `note` set to a report-facing description of why.
@@ -198,15 +206,19 @@ def gather_candidates(client: GitHubClient, repos_cfg: list[dict]) -> tuple[list
         repo = repo_table["name"]
         repo_candidates: list[Candidate] = []
         for tc in build_thread_configs(repo_table):
-            cutoff = cutoff_timestamp(tc.inactive_days)
+            search_days = max(tc.inactive_days - tc.look_forward_days, 0)
+            lock_cutoff = datetime.now(UTC) - timedelta(days=tc.inactive_days)
             try:
-                found = search_issue_like(client, repo, tc.kind, cutoff)
+                found = search_issue_like(client, repo, tc.kind, cutoff_timestamp(search_days))
             except StopEarly as exc:
                 note = stop_reason(exc)
                 print(f"Stopping search early ({note}) at {repo} [{tc.kind}]: {exc}", file=sys.stderr)
                 break
 
-            repo_candidates.extend(Candidate(repo, number, updated_at, tc) for number, updated_at in found)
+            repo_candidates.extend(
+                Candidate(repo, number, updated_at, tc, queued=updated_at >= lock_cutoff)
+                for number, updated_at in found
+            )
 
         repo_candidates.sort(key=lambda c: c.updated_at)  # oldest / most overdue first, within this repo
         by_repo[repo] = repo_candidates
@@ -325,6 +337,9 @@ def main() -> None:
     errors = []
     results: list[tuple[Candidate, str, str | None]] = []
     for entry in to_process:
+        if entry.queued:
+            results.append((entry, "Queued", None))
+            continue
         try:
             process_candidate(client, entry, args.dry_run)
             results.append((entry, "Would lock" if args.dry_run else "Locked", None))
