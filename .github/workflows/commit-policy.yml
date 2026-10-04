@@ -11,7 +11,7 @@ on:
 jobs:
   check:
     name: Block AI Agent and Bot Commits
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.repository_owner == 'saga-soft'
     runs-on: ubuntu-latest
     permissions:
       contents: read
