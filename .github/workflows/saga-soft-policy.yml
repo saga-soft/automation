@@ -1,4 +1,4 @@
-name: Commit Policy
+name: Policy Checks
 
 on:
   workflow_call:
