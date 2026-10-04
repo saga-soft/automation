@@ -26,6 +26,7 @@ import yaml
 
 CONFIG_PATH = Path(__file__).parent / "lock_threads.yaml"
 REPORT_PATH = Path(__file__).parent / "lock_threads_report.md"
+REF_NOW_TIME = datetime.now(UTC)
 
 MAX_API_CALLS_PER_RUN = 70  # Rate limit is 5000 per hour, 83 per minute
 SEARCH_PAGE_SIZE = 100
@@ -33,6 +34,7 @@ MAX_SEARCH_PAGES = 3
 
 LOCK_REASON = "resolved"
 KIND_TABLE = (("issue", "issues"), ("pr", "prs"))
+KIND_LABELS = {"issue": "Issues", "pr": "Pull Requests"}
 KIND_URL_PATH = {"issue": "issues", "pr": "pull"}
 RATE_LIMIT_MARKERS = ("rate limit exceeded", "secondary rate limit")
 
@@ -60,6 +62,7 @@ def stop_reason(exc: StopEarly) -> str:
 class ThreadConfig:
     """Settings for one thread kind (issue or pr) within a repo group."""
 
+    name: str
     kind: str  # "issue" or "pr"
     inactive_days: int
     comment: str | None = None
@@ -74,7 +77,7 @@ class Candidate:
     number: int
     updated_at: datetime
     config: ThreadConfig
-    queued: bool = False
+    queued_in: int = 0
 
 
 class GitHubClient:
@@ -130,6 +133,7 @@ def build_thread_configs(repo_table: dict) -> list[ThreadConfig]:
             raise ValueError(f"{repo} [{key}]: missing 'inactive_days'")
         configs.append(
             ThreadConfig(
+                name=repo,
                 kind=kind,
                 inactive_days=inactive_days,
                 comment=table.get("comment"),
@@ -141,7 +145,7 @@ def build_thread_configs(repo_table: dict) -> list[ThreadConfig]:
 
 def cutoff_timestamp(days: int) -> str:
     """Return the ISO timestamp `days` before now, for use in a search query."""
-    dt = datetime.now(UTC) - timedelta(days=days)
+    dt = REF_NOW_TIME - timedelta(days=days)
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -184,7 +188,10 @@ def interleave_by_repo(by_repo: dict[str, list[Candidate]]) -> list[Candidate]:
     return [candidate for round_ in rounds for candidate in round_ if candidate is not None]
 
 
-def gather_candidates(client: GitHubClient, repos_cfg: list[dict]) -> tuple[list[Candidate], str | None]:
+def gather_candidates(
+    client: GitHubClient,
+    check_repos: dict[str, list[ThreadConfig]],
+) -> tuple[list[Candidate], str | None]:
     """Search every configured repo/kind and return candidates to process.
 
     Candidates are grouped per repo (oldest first within each repo), then
@@ -202,12 +209,10 @@ def gather_candidates(client: GitHubClient, repos_cfg: list[dict]) -> tuple[list
     """
     by_repo: dict[str, list[Candidate]] = {}
     note: str | None = None
-    for repo_table in repos_cfg:
-        repo = repo_table["name"]
+    for repo, configs in check_repos.items():
         repo_candidates: list[Candidate] = []
-        for tc in build_thread_configs(repo_table):
+        for tc in configs:
             search_days = max(tc.inactive_days - tc.look_forward_days, 0)
-            lock_cutoff = datetime.now(UTC) - timedelta(days=tc.inactive_days)
             try:
                 found = search_issue_like(client, repo, tc.kind, cutoff_timestamp(search_days))
             except StopEarly as exc:
@@ -216,7 +221,7 @@ def gather_candidates(client: GitHubClient, repos_cfg: list[dict]) -> tuple[list
                 break
 
             repo_candidates.extend(
-                Candidate(repo, number, updated_at, tc, queued=updated_at >= lock_cutoff)
+                Candidate(repo, number, updated_at, tc, queued_in=max(0, tc.inactive_days - days_since(updated_at)))
                 for number, updated_at in found
             )
 
@@ -234,14 +239,17 @@ def candidate_label(candidate: Candidate) -> str:
     return f"{candidate.repo} {candidate.config.kind} #{candidate.number}"
 
 
-def candidate_url(candidate: Candidate) -> str:
+def repo_link(repo: str) -> str:
     """Return the GitHub URL for a candidate thread."""
-    return f"https://github.com/{candidate.repo}/{KIND_URL_PATH[candidate.config.kind]}/{candidate.number}"
+    return f"[{repo}](https://github.com/{repo})"
 
 
 def candidate_link(candidate: Candidate) -> str:
     """Return the candidate's label as a markdown link to its GitHub thread."""
-    return f"[{candidate_label(candidate)}]({candidate_url(candidate)})"
+    return (
+        f"[{candidate_label(candidate)}]"
+        f"(https://github.com/{candidate.repo}/{KIND_URL_PATH[candidate.config.kind]}/{candidate.number})"
+    )
 
 
 def process_candidate(client: GitHubClient, candidate: Candidate, dry_run: bool) -> None:
@@ -265,7 +273,7 @@ def format_timestamp(dt: datetime) -> str:
 
 def days_since(dt: datetime) -> int:
     """Return the number of whole days between dt and now."""
-    return (datetime.now(UTC) - dt).days
+    return (REF_NOW_TIME - dt).days
 
 
 def build_report(
@@ -273,13 +281,14 @@ def build_report(
     total_found: int,
     repo_count: int,
     skipped: int,
+    check_repos: dict[str, list[ThreadConfig]],
     results: list[tuple[Candidate, str, str | None]],
     stop_note: str | None = None,
 ) -> str:
     """Build a markdown report summarizing what was (or would be) locked."""
     lines = ["## Lock Threads Report", ""]
     lines.append(f"**Mode:** {'Dry Run' if dry_run else 'Live'}  ")
-    lines.append(f"**Time:** {format_timestamp(datetime.now(UTC))} (UTC)  ")
+    lines.append(f"**Time:** {format_timestamp(REF_NOW_TIME)} (UTC)  ")
     lines.append(f"**Found:** {total_found} inactive thread(s) across {repo_count} repo(s)  ")
     if skipped > 0:
         lines.append(f"**Deferred:** {skipped} thread(s) to the next run  ")
@@ -291,16 +300,31 @@ def build_report(
         lines.append("No threads processed.")
         return "\n".join(lines) + "\n"
 
-    lines.append("| Thread | Last Updated (UTC) | Days | Comment | Status |")
+    lines.append("### Checking Repos")
+    lines.append("")
+    lines.append("| Repo | Target | Max Age | Forward |")
+    lines.append("|---|---|---|---|")
+    for repo, configs in check_repos.items():
+        lines.extend(
+            f"| {repo_link(repo)} | {KIND_LABELS.get(tc.kind, 'ERR')}"
+            f" | {tc.inactive_days} days | {tc.look_forward_days} days |"
+            for tc in configs
+        )
+    lines.append("")
+
+    lines.append("### Results")
+    lines.append("")
+    lines.append("| Thread | Last Updated (UTC) | Age | Comment | Status |")
     lines.append("|---|---|---|---|---|")
     for candidate, status, detail in results:
         comment = "Yes" if candidate.config.comment else "No"
         status_text = f"{status}: {detail}" if detail else status
         lines.append(
             f"| {candidate_link(candidate)} | {format_timestamp(candidate.updated_at)} "
-            f"| {days_since(candidate.updated_at)} | {comment} | {status_text} |"
+            f"| {days_since(candidate.updated_at)} days | {comment} | {status_text} |"
         )
     lines.append("")
+
     return "\n".join(lines) + "\n"
 
 
@@ -326,8 +350,13 @@ def main() -> None:
     if not repos_cfg:
         parser.error("Config has no 'repo' entries")
 
+    check_repos = {}
+    for repo_table in repos_cfg:
+        repo = repo_table["name"]
+        check_repos[repo] = build_thread_configs(repo_table)
+
     client = GitHubClient()
-    candidates, stop_note = gather_candidates(client, repos_cfg)
+    candidates, stop_note = gather_candidates(client, check_repos)
     print(f"Found {len(candidates)} inactive thread(s) across {len(repos_cfg)} repo(s)")
 
     # If searching already used up the run's call budget (or hit a rate
@@ -337,8 +366,8 @@ def main() -> None:
     errors = []
     results: list[tuple[Candidate, str, str | None]] = []
     for entry in to_process:
-        if entry.queued:
-            results.append((entry, "Queued", None))
+        if entry.queued_in > 0:
+            results.append((entry, f"Locking in {entry.queued_in} day(s)", None))
             continue
         try:
             process_candidate(client, entry, args.dry_run)
@@ -353,7 +382,7 @@ def main() -> None:
             print(f"ERROR locking {entry.repo} {entry.config.kind} #{entry.number}: {exc}", file=sys.stderr)
 
     skipped = len(candidates) - len(results)
-    report = build_report(args.dry_run, len(candidates), len(repos_cfg), skipped, results, stop_note)
+    report = build_report(args.dry_run, len(candidates), len(repos_cfg), skipped, check_repos, results, stop_note)
 
     REPORT_PATH.write_text(report, encoding="utf-8")
     print(f"\nWrote report to {REPORT_PATH}")
