@@ -18,3 +18,24 @@ optional comment to post on the issue or pull request. An optional `look_forward
 threads that aren't old enough to lock yet but will become inactive within that many days. These are listed in the
 report with the status "Queued" instead of being locked. The job is performed by the
 [Saga Soft Bot](https://github.com/saga-soft-bot) account.
+
+
+## Reusable Workflows
+
+### Commit Policy
+
+A reusable workflow that fails a pull request if any of its commits has an AI agent or bot author, committer, or
+attribution trailer. The `dependabot` and `github-actions` bots are allowed. An optional `policy-url` input adds a
+link to the error message. Call it as a separate job:
+
+```yaml
+jobs:
+  commitPolicy:
+    name: Commit Policy
+    uses: saga-soft/automation/.github/workflows/commit-policy.yml@main
+    permissions:
+      contents: read
+      pull-requests: read
+    with:
+      policy-url: https://github.com/saga-soft/<repo>/blob/main/AI_POLICY.md
+```

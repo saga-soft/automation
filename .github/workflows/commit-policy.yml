@@ -1,0 +1,39 @@
+name: Commit Policy
+
+on:
+  workflow_call:
+    inputs:
+      policy-url:
+        description: Link to the policy
+        type: string
+        default: ""
+
+jobs:
+  check:
+    name: Block AI Agent and Bot Commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check Commit Identities
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          POLICY: ${{ inputs.policy-url }}
+          TRAILERS: "co-authored-by|co-developed-by|assisted-by|generated-by"
+          AGENTS: '(^|[^A-Za-z0-9._+-])(noreply@anthropic\.com|cursoragent@cursor\.com|openhands@all-hands\.dev|amp@ampcode\.com)|\+Copilot@users\.noreply\.github\.com'
+          TOOLS: '(assisted-by|generated-by):[^:]*\b(claude|copilot|cursor|aider|gemini|codex|chatgpt|gpt|openhands|devin|windsurf|amp|jules)\b'
+          BOTS: '(?<![A-Za-z0-9-])(?!(dependabot|github-actions)\[bot\])[A-Za-z0-9-]+\[bot\]'
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/commits" --paginate \
+            --jq '.[] | "\(.sha[0:7]) \(.commit.author.email) \(.commit.committer.email) \(
+                  [.commit.message | splits("\n") | select(test("^(\(env.TRAILERS)):"; "i"))] | join(" "))"' \
+            > "$RUNNER_TEMP/commits.txt"
+          bad=$(grep -iP "$AGENTS|$TOOLS|$BOTS" "$RUNNER_TEMP/commits.txt" || true)
+          if [ -n "$bad" ]; then
+            echo "::error::Commits with AI agent or bot identities found${POLICY:+, see $POLICY}"
+            echo "$bad"
+            exit 1
+          fi
